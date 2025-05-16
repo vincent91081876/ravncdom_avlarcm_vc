@@ -73,23 +73,26 @@
         const WORK_CYCLE_MS = 90 * 60 * 1000; // 90 分鐘 in ms
         const LONG_BREAK_MS = 20 * 60 * 1000; // 20 分鐘 in ms
 
-        let currentTimerId = null;
-        let currentStatus = 'idle'; // 'idle', 'working', 'short-rest', 'long-break'
+        let phaseTimerId = null; // Timer for the main phase duration (work, rest)
+        let countdownTimerId = null; // Timer for the second-by-second countdown display
+
+        let currentStatus = 'idle'; // 'idle', 'working', 'short-rest', 'long-break', 'playing-alarm'
         let cycleStartTime = null; // Timestamp when the current 90min cycle started
 
-        function updateStatus(message, remainingTime = 0) {
+        function updateStatus(message, remainingTime = -1) {
             statusDiv.textContent = message;
 
-            clearInterval(currentTimerId); // Clear previous countdown interval if any
+            // Clear previous countdown timer
+            clearInterval(countdownTimerId);
+            countdownDiv.textContent = ''; // Clear display initially
 
             if (remainingTime > 0) {
-                // Update countdown every second
                 const endTime = Date.now() + remainingTime;
                 const updateCountdown = () => {
                     const timeUntilEnd = endTime - Date.now();
                     if (timeUntilEnd <= 0) {
-                         countdownDiv.textContent = '';
-                         clearInterval(countdownTimer);
+                         countdownDiv.textContent = '0:00'; // Show 0 when done or just finished
+                         clearInterval(countdownTimerId);
                     } else {
                         const minutes = Math.floor(timeUntilEnd / 60000);
                         const seconds = Math.floor((timeUntilEnd % 60000) / 1000);
@@ -97,106 +100,132 @@
                     }
                 };
                 updateCountdown(); // Update immediately
-                const countdownTimer = setInterval(updateCountdown, 1000);
-                currentTimerId = countdownTimer; // Store the countdown interval ID
-            } else {
-                countdownDiv.textContent = ''; // Clear countdown if no remaining time
+                countdownTimerId = setInterval(updateCountdown, 1000);
             }
+            // If remainingTime is not > 0, countdown display remains empty (or cleared above)
         }
 
         function getRandomWorkTime() {
             return Math.floor(Math.random() * (MAX_WORK_MS - MIN_WORK_MS + 1)) + MIN_WORK_MS;
         }
 
-        function startWorkPhase() {
-            // Check if 90 minutes are up before starting a *new* work phase
-            if (cycleStartTime && (Date.now() - cycleStartTime >= WORK_CYCLE_MS)) {
-                console.log("90 minutes reached. Starting long break.");
-                startLongBreak();
-                return; // Stop here, don't start regular work phase
-            }
-
-            const workTime = getRandomWorkTime();
-            currentStatus = 'working';
-            updateStatus(`工作中 (等待下一個提示音)`, workTime);
-
-            // Set a timer to play alarm after the work time
-            currentTimerId = setTimeout(playAlarm, workTime);
-             console.log(`Starting work phase for ${workTime / 1000} seconds`);
-        }
-
-        function playAlarm() {
+        // Function to play the alarm and then execute a callback function
+        function playAlarmAndThen(nextPhaseLogicFunction) {
             currentStatus = 'playing-alarm';
-            console.log("Playing alarm");
-             updateStatus('提示音!');
+            updateStatus('提示音!');
+             console.log("Playing alarm...");
 
-            // Try to play the sound
+            // Clear the timer that just finished the previous phase
+            clearTimeout(phaseTimerId); // This is important
+
             alarmSound.currentTime = 0; // Reset sound to start
             const playPromise = alarmSound.play();
 
-            // Handle potential play() issues (like needing user interaction)
+            const afterAlarmAction = () => {
+                console.log("Audio sequence or fallback delay done. Calling next phase logic.");
+                // Add a small buffer delay before calling the next step
+                // Use setTimeout to avoid blocking the main thread even if nextPhaseLogicFunction is fast
+                phaseTimerId = setTimeout(nextPhaseLogicFunction, 500); // Use phaseTimerId for this transition delay
+            };
+
             if (playPromise !== undefined) {
-              playPromise.then(() => {
-                // Autoplay started! Audio is playing.
-                 console.log("Audio played successfully.");
-                 // After sound plays (even if instant), start short rest
-                 currentTimerId = setTimeout(startShortRest, 500); // Add a small buffer if sound is short
-              }).catch(error => {
-                // Autoplay was prevented.
-                 console.error("Audio play prevented:", error);
-                 statusDiv.textContent = '播放提示音被阻擋。請點擊頁面某處或允許自動播放。';
-                 // Still continue the cycle after a short delay, as the lack of sound is the only issue
-                 currentTimerId = setTimeout(startShortRest, 5000); // Wait a bit longer for manual interaction attempt
+              playPromise.then(afterAlarmAction).catch(error => {
+                console.error("Audio play prevented:", error);
+                statusDiv.textContent = '播放提示音被阻擋。請點擊頁面某處或允許自動播放。';
+                // Continue even if sound failed, perhaps after a slightly longer delay for user interaction or acknowledgement
+                phaseTimerId = setTimeout(nextPhaseLogicFunction, 3000); // Use phaseTimerId for the fallback delay
               });
             } else {
-                 // For older browsers maybe
-                 console.log("Audio played without promise.");
-                 currentTimerId = setTimeout(startShortRest, 500);
+                 // Fallback for older browsers or environments without Promise
+                 console.log("Audio play initiated (no Promise).");
+                 phaseTimerId = setTimeout(nextPhaseLogicFunction, 500); // Use phaseTimerId for the fallback delay
             }
+        }
+
+        // --- Phase Logic Functions ---
+
+        function startWorkPhase() {
+            // Before starting work, check if it's time for a long break *after* a non-long-break phase ended
+             if (cycleStartTime && (Date.now() - cycleStartTime >= WORK_CYCLE_MS)) {
+                 console.log("90 minutes cycle elapsed. Proceeding to long break initiation after current alarm.");
+                 // This check happens *after* an alarm *would* have played (at end of short rest),
+                 // the alarm handler will call continueCycle(), which leads here.
+                 // If cycleStartTime is set and time is up, *directly* call startLongBreak
+                 // Wait slightly just for UI update if any.
+                 updateStatus("90分鐘循環結束，進入長時間休息...");
+                 clearTimeout(phaseTimerId); // Clear any pending next step from the alarm handler
+                 phaseTimerId = setTimeout(startLongBreak, 1000); // Give a moment before starting the long break phase
+                 return; // Prevent starting regular work phase
+             }
+
+
+            const workTime = getRandomWorkTime();
+            currentStatus = 'working';
+            updateStatus(`工作中`, workTime);
+            console.log(`Starting work phase for ${workTime / 1000} seconds.`);
+
+            // Schedule end of work phase, play alarm, and then transition to short rest
+            clearTimeout(phaseTimerId); // Clear any old phase timers
+            phaseTimerId = setTimeout(() => {
+                console.log("Work phase ended.");
+                playAlarmAndThen(startShortRest); // Play alarm, then start short rest
+            }, workTime);
         }
 
         function startShortRest() {
             currentStatus = 'short-rest';
-            updateStatus(`休息一下 (10 秒)...`, SHORT_REST_MS);
-             console.log("Starting short rest (10 seconds)");
+            updateStatus(`休息一下 (10 秒)`, SHORT_REST_MS);
+             console.log("Starting short rest (10 seconds).");
 
-            // Set a timer to continue the cycle after short rest
-            currentTimerId = setTimeout(continueCycle, SHORT_REST_MS);
+            // Schedule end of short rest phase, play alarm, and then transition to continueCycle
+            clearTimeout(phaseTimerId);
+            phaseTimerId = setTimeout(() => {
+                console.log("Short rest phase ended.");
+                playAlarmAndThen(continueCycle); // Play alarm, then continue cycle (check for 90 min)
+            }, SHORT_REST_MS);
         }
 
+         // Decides whether to start a new work phase or a long break AFTER an alarm (usually short rest end)
         function continueCycle() {
              console.log("Continuing cycle...");
-            // This function decides whether to start a long break or another work phase
-            // Check the 90 minute condition AGAIN here just to be safe after a short rest
-             if (cycleStartTime && (Date.now() - cycleStartTime >= WORK_CYCLE_MS)) {
-                 console.log("90 minutes elapsed during cycle, initiating long break.");
-                 startLongBreak();
-             } else {
-                 console.log("Less than 90 minutes, starting another work phase.");
-                 startWorkPhase(); // Loop back to regular work phase
-             }
+            clearTimeout(phaseTimerId); // Clear any pending transition timeout
+
+            // This is the point where we check if 90 mins are done *after a non-long-break phase ended*.
+            if (cycleStartTime && (Date.now() - cycleStartTime >= WORK_CYCLE_MS)) {
+                console.log("90 minutes elapsed during cycle. Starting long break.");
+                startLongBreak(); // Start long break immediately
+            } else {
+                console.log("Less than 90 minutes. Starting another work phase.");
+                startWorkPhase(); // Continue with regular work/short-rest cycle
+            }
         }
+
 
         function startLongBreak() {
             currentStatus = 'long-break';
-            updateStatus(`長時間休息中 (20 分鐘)...`, LONG_BREAK_MS);
-            console.log("Starting long break (20 minutes)");
+            updateStatus(`長時間休息中 (20 分鐘)`, LONG_BREAK_MS);
+            console.log("Starting long break (20 minutes).");
 
-            // Set a timer to end the long break
-            currentTimerId = setTimeout(endLongBreak, LONG_BREAK_MS);
+            // Schedule end of long break phase, play alarm, and then transition to long break end logic
+            clearTimeout(phaseTimerId);
+            phaseTimerId = setTimeout(() => {
+                console.log("Long break phase ended.");
+                playAlarmAndThen(endLongBreakLogic); // Play alarm, then execute long break end logic
+            }, LONG_BREAK_MS);
         }
 
-        function endLongBreak() {
-            currentStatus = 'idle'; // Temporarily idle state before new cycle starts
-            updateStatus('長時間休息結束。準備開始新一輪 90 分鐘循環...');
-             console.log("Long break ended.");
+         // Handles the logic after the long break alarm finishes
+        function endLongBreakLogic() {
+             console.log("Executing long break end logic.");
+             clearTimeout(phaseTimerId); // Clear any pending transition timeout
 
-            // Reset the cycle start time *after* the long break ends
+            // Reset the cycle start time *after* the long break ends and the alarm has played
             cycleStartTime = Date.now();
-             console.log(`New 90 minute cycle started at ${new Date(cycleStartTime).toLocaleTimeString()}`);
+             console.log(`New 90 minute cycle started at ${new Date(cycleStartTime).toLocaleTimeString()}.`);
 
-            // Immediately start a new work phase (beginning a new 90-min block)
-            setTimeout(startWorkPhase, 2000); // Add a small delay before new work starts for clarity
+            // Start a new work phase (beginning a new 90-min block) after a small delay
+            updateStatus('長時間休息結束。準備開始新一輪 90 分鐘循環...');
+             phaseTimerId = setTimeout(startWorkPhase, 2000); // Give a moment before starting the new cycle work
         }
 
 
@@ -208,26 +237,33 @@
 
             // Attempt to unlock audio context by playing and pausing a sound
             // This is a common workaround for browser autoplay policies
+             console.log("Attempting to unlock audio context...");
              if (alarmSound.muted || alarmSound.paused) {
                  alarmSound.muted = true;
+                 alarmSound.volume = 0.01; // Very low volume for unlock
                  alarmSound.play().then(() => {
                      alarmSound.pause();
                      alarmSound.currentTime = 0;
                      alarmSound.muted = false;
+                     alarmSound.volume = 1.0; // Reset volume
                      console.log("Audio context unlocked.");
                  }).catch(error => {
                      console.warn("Failed to unlock audio context:", error);
-                     // Still continue, but audio might be blocked later
+                     statusDiv.textContent = '提示: 音效可能需要手動允許才能播放。';
                  });
              } else {
-                 console.log("Audio seems unlockable.");
+                 console.log("Audio seems already unlockable.");
              }
 
 
             // Start the very first work cycle
             cycleStartTime = Date.now();
-            console.log(`First 90 minute cycle started at ${new Date(cycleStartTime).toLocaleTimeString()}`);
-            startWorkPhase();
+            console.log(`First 90 minute cycle started at ${new Date(cycleStartTime).toLocaleTimeString()}.`);
+
+            // Start the first phase (work)
+             // Add a small initial delay after button click for potential unlock and clarity
+             updateStatus('即將開始工作循環...');
+             phaseTimerId = setTimeout(startWorkPhase, 1000);
         });
 
         // Initial status display
