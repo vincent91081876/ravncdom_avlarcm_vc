@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>工作/休息計時器</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #f0f0f0;
+            margin: 0;
+            text-align: center;
+        }
+        h1 {
+            color: #333;
+        }
+        #status {
+            margin-top: 20px;
+            font-size: 1.2em;
+            color: #555;
+            min-height: 1.5em; /* Prevent layout shifts */
+        }
+        #countdown {
+             margin-top: 10px;
+             font-size: 2em;
+             color: #007bff;
+        }
+        button {
+            margin-top: 20px;
+            padding: 10px 20px;
+            font-size: 1.1em;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            background-color: #28a745;
+            color: white;
+            transition: background-color 0.3s ease;
+        }
+        button:hover {
+            background-color: #218838;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>工作/休息計時器</h1>
+    <div id="status">準備中...</div>
+    <div id="countdown"></div>
+
+    <!-- 請確保這裡的 src 指向您的音效檔 -->
+    <audio id="alarmSound" src="alarm.mp3" preload="auto"></audio>
+
+    <button id="startButton">開始</button>
+
+    <script>
+        const statusDiv = document.getElementById('status');
+        const countdownDiv = document.getElementById('countdown');
+        const startButton = document.getElementById('startButton');
+        const alarmSound = document.getElementById('alarmSound');
+
+        const MIN_WORK_MS = 3 * 60 * 1000; // 3 分鐘 in ms
+        const MAX_WORK_MS = 5 * 60 * 1000; // 5 分鐘 in ms
+        const SHORT_REST_MS = 10 * 1000; // 10 秒 in ms
+        const WORK_CYCLE_MS = 90 * 60 * 1000; // 90 分鐘 in ms
+        const LONG_BREAK_MS = 20 * 60 * 1000; // 20 分鐘 in ms
+
+        let currentTimerId = null;
+        let currentStatus = 'idle'; // 'idle', 'working', 'short-rest', 'long-break'
+        let cycleStartTime = null; // Timestamp when the current 90min cycle started
+
+        function updateStatus(message, remainingTime = 0) {
+            statusDiv.textContent = message;
+
+            clearInterval(currentTimerId); // Clear previous countdown interval if any
+
+            if (remainingTime > 0) {
+                // Update countdown every second
+                const endTime = Date.now() + remainingTime;
+                const updateCountdown = () => {
+                    const timeUntilEnd = endTime - Date.now();
+                    if (timeUntilEnd <= 0) {
+                         countdownDiv.textContent = '';
+                         clearInterval(countdownTimer);
+                    } else {
+                        const minutes = Math.floor(timeUntilEnd / 60000);
+                        const seconds = Math.floor((timeUntilEnd % 60000) / 1000);
+                        countdownDiv.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                    }
+                };
+                updateCountdown(); // Update immediately
+                const countdownTimer = setInterval(updateCountdown, 1000);
+                currentTimerId = countdownTimer; // Store the countdown interval ID
+            } else {
+                countdownDiv.textContent = ''; // Clear countdown if no remaining time
+            }
+        }
+
+        function getRandomWorkTime() {
+            return Math.floor(Math.random() * (MAX_WORK_MS - MIN_WORK_MS + 1)) + MIN_WORK_MS;
+        }
+
+        function startWorkPhase() {
+            // Check if 90 minutes are up before starting a *new* work phase
+            if (cycleStartTime && (Date.now() - cycleStartTime >= WORK_CYCLE_MS)) {
+                console.log("90 minutes reached. Starting long break.");
+                startLongBreak();
+                return; // Stop here, don't start regular work phase
+            }
+
+            const workTime = getRandomWorkTime();
+            currentStatus = 'working';
+            updateStatus(`工作中 (等待下一個提示音)`, workTime);
+
+            // Set a timer to play alarm after the work time
+            currentTimerId = setTimeout(playAlarm, workTime);
+             console.log(`Starting work phase for ${workTime / 1000} seconds`);
+        }
+
+        function playAlarm() {
+            currentStatus = 'playing-alarm';
+            console.log("Playing alarm");
+             updateStatus('提示音!');
+
+            // Try to play the sound
+            alarmSound.currentTime = 0; // Reset sound to start
+            const playPromise = alarmSound.play();
+
+            // Handle potential play() issues (like needing user interaction)
+            if (playPromise !== undefined) {
+              playPromise.then(() => {
+                // Autoplay started! Audio is playing.
+                 console.log("Audio played successfully.");
+                 // After sound plays (even if instant), start short rest
+                 currentTimerId = setTimeout(startShortRest, 500); // Add a small buffer if sound is short
+              }).catch(error => {
+                // Autoplay was prevented.
+                 console.error("Audio play prevented:", error);
+                 statusDiv.textContent = '播放提示音被阻擋。請點擊頁面某處或允許自動播放。';
+                 // Still continue the cycle after a short delay, as the lack of sound is the only issue
+                 currentTimerId = setTimeout(startShortRest, 5000); // Wait a bit longer for manual interaction attempt
+              });
+            } else {
+                 // For older browsers maybe
+                 console.log("Audio played without promise.");
+                 currentTimerId = setTimeout(startShortRest, 500);
+            }
+        }
+
+        function startShortRest() {
+            currentStatus = 'short-rest';
+            updateStatus(`休息一下 (10 秒)...`, SHORT_REST_MS);
+             console.log("Starting short rest (10 seconds)");
+
+            // Set a timer to continue the cycle after short rest
+            currentTimerId = setTimeout(continueCycle, SHORT_REST_MS);
+        }
+
+        function continueCycle() {
+             console.log("Continuing cycle...");
+            // This function decides whether to start a long break or another work phase
+            // Check the 90 minute condition AGAIN here just to be safe after a short rest
+             if (cycleStartTime && (Date.now() - cycleStartTime >= WORK_CYCLE_MS)) {
+                 console.log("90 minutes elapsed during cycle, initiating long break.");
+                 startLongBreak();
+             } else {
+                 console.log("Less than 90 minutes, starting another work phase.");
+                 startWorkPhase(); // Loop back to regular work phase
+             }
+        }
+
+        function startLongBreak() {
+            currentStatus = 'long-break';
+            updateStatus(`長時間休息中 (20 分鐘)...`, LONG_BREAK_MS);
+            console.log("Starting long break (20 minutes)");
+
+            // Set a timer to end the long break
+            currentTimerId = setTimeout(endLongBreak, LONG_BREAK_MS);
+        }
+
+        function endLongBreak() {
+            currentStatus = 'idle'; // Temporarily idle state before new cycle starts
+            updateStatus('長時間休息結束。準備開始新一輪 90 分鐘循環...');
+             console.log("Long break ended.");
+
+            // Reset the cycle start time *after* the long break ends
+            cycleStartTime = Date.now();
+             console.log(`New 90 minute cycle started at ${new Date(cycleStartTime).toLocaleTimeString()}`);
+
+            // Immediately start a new work phase (beginning a new 90-min block)
+            setTimeout(startWorkPhase, 2000); // Add a small delay before new work starts for clarity
+        }
+
+
+        // --- Event Listener and Initialization ---
+
+        startButton.addEventListener('click', () => {
+            startButton.disabled = true;
+            startButton.textContent = '執行中...';
+
+            // Attempt to unlock audio context by playing and pausing a sound
+            // This is a common workaround for browser autoplay policies
+             if (alarmSound.muted || alarmSound.paused) {
+                 alarmSound.muted = true;
+                 alarmSound.play().then(() => {
+                     alarmSound.pause();
+                     alarmSound.currentTime = 0;
+                     alarmSound.muted = false;
+                     console.log("Audio context unlocked.");
+                 }).catch(error => {
+                     console.warn("Failed to unlock audio context:", error);
+                     // Still continue, but audio might be blocked later
+                 });
+             } else {
+                 console.log("Audio seems unlockable.");
+             }
+
+
+            // Start the very first work cycle
+            cycleStartTime = Date.now();
+            console.log(`First 90 minute cycle started at ${new Date(cycleStartTime).toLocaleTimeString()}`);
+            startWorkPhase();
+        });
+
+        // Initial status display
+        updateStatus('準備中，請點擊 "開始"');
+
+    </script>
+
+</body>
+</html>
